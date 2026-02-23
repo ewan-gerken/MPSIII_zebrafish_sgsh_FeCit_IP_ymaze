@@ -1,0 +1,1848 @@
+---
+title: "sgsh aged FeCit IP injection y-maze"
+author: "Ewan Gerken"
+date: "2023-03-08"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  autodep = TRUE,
+  echo = TRUE, 
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center", 
+  fig.retina = 1,
+  out.width ="100%", 
+  out.height = "100%"
+)
+```
+
+```{r packages}
+library(tidyverse)
+library(readxl)
+library(here)
+library(magrittr)
+library(scales)
+library(readxl)
+library(ggpubr)
+library(ggeasy)
+library(ggfortify)
+library(ggbeeswarm)
+library(ggforce)
+library(ggrepel)
+library(kableExtra)
+library(ggtext)
+
+# stat analysis
+library(broom)
+library(lme4)
+library(performance)
+library(car)
+library(emmeans)
+library(glmmTMB)
+library(MASS)
+library(AICcmodavg)
+library(DHARMa)
+library(stats)
+
+# set the default theme for ggplot as theme_bw
+theme_set(theme_bw())
+```
+
+# Introduction. 
+
+
+
+Each fish was isolated in the behavioru testing room for 45 mins prior to behaviour testing. It was then placed in the mazes alone for 1 hour. Raw data was collected, and metadata was recorded (i.e. sex, time, etc). These raw data spreadsheets were batch processed in the BatchProcess R script in the `code` folder to produce the `final_data` object. This object contains the tetragram frequencies and total number of turns. Note that fish were genotyped after data collection so that we are blinded from any observer bias until after raw data collection.
+
+
+```{r}
+# read in the processed data and metadata
+meta <- read_xlsx("data/metadata/sgsh FeCit IP metadata.xlsx") %>% 
+  mutate(fish_id = as.factor(fish_id),
+         start_time = as.factor(start_time),
+         inj_time = as.factor(inj_time),
+         tank = as.factor(tank),
+         sex = as.factor(sex),
+         zantiks_unit = as.factor(zantiks_unit),
+         arena_position = as.factor(arena_position),
+         genotype = factor(genotype, levels = c("wt", "het", "hom")),
+         treatment = factor(treatment, levels = c("saline", 
+                                       "FeCit")),
+  )
+
+# make an object for the dead fish from the metadata only (can't using final 
+# data since the dead fish weren't behaviour tested)
+
+meta_dead <- meta %>%
+  dplyr::filter(dead== "Y")
+
+final_data <- read_csv("data/processed_data/final_output.csv") %>% 
+  dplyr::select(-1) %>% 
+  mutate(fish_id = factor(fish_id)) %>% 
+  left_join(meta) %>% 
+  dplyr::filter(genotype %in% c("wt", "het", "hom"))
+#view(final_data)
+
+# make an object which converts the final data to long format. for easier plotting in ggplot
+final_data_long <- final_data %>%
+  gather(key = "tetras", value = "Count", # convert to long format
+         grep("[L|R]{4}", 
+              colnames(.))
+         )
+
+# also make an object which sums the tetragrams over the hour
+final_data_summedoverbins <- final_data %>%
+  gather(key = "tetras", value = "Count", # convert to long format
+         grep("[L|R]{4}", # select the columns which contain a L or a R four times
+              colnames(.))
+         ) %>% 
+  group_by(fish_id, tetras) %>% 
+  mutate(x = sum(Count)) %>% # sum the tetragram counts per fish_id
+  dplyr::select(colnames(meta), tetras, x) %>% 
+  unique
+```
+
+# assess whether tracking worked correctly. 
+
+When assessing behavioural tracking data, it is important to check whether the tracking of your animal was correct. I saved the tracking videos for watching, but also I will check the data to see whether any abnormalities are present.
+
+From my previous experience with zebrafish in a y-maze, fish do not make more than 200 turns per 10 mins in the Y-maze. Plotting out the total number of turns per fish per 10 minute bin show a couple of fish looking very busy. 
+
+```{r}
+final_data %>% 
+  ggplot(aes(x = fish_id, y = total_turns)) +
+  geom_col(aes(fill = total_turns >= 200)) + 
+  geom_label_repel(aes(label = fish_id), 
+                   data = . %>% 
+                     dplyr::filter(total_turns >= 200)) +
+  facet_wrap(~bin) +
+  scale_fill_manual(values = c("grey50", "red"))
+```
+
+## Removing fish
+
+```{r}
+# define fish which had the tracking issues
+fish2omit_geno <- meta %>%
+   dplyr::filter(is.na(genotype)) %>%
+   pull(fish_id)
+
+fish2omit_keepCol <- meta %>%
+   dplyr::filter(keep== "N") %>%
+   pull(fish_id)
+ 
+fish2omit_dead <- meta %>%
+   dplyr::filter(dead== "Y") %>%
+   pull(fish_id)
+  
+fish2omit <- c(fish2omit_geno, fish2omit_keepCol, fish2omit_dead) %>%
+  unique()
+
+# Manually remove fish
+
+fish2omit <- c(fish2omit, "")
+
+# remove them. Can also use this to remove fish which I had already decided to exclude based on events/observations before or during the test (see 'notes' column of metadata spreadsheet. I change the 'keep' column of these to "N", I then have code above that will filter these. For more outlier fish I come across in my analysis, I can use the manual remove line of code I wrote above.
+
+final_data %<>%
+  dplyr::filter(!(fish_id %in%fish2omit))
+
+final_data_long%<>%
+  dplyr::filter(!(fish_id %in% fish2omit))
+
+final_data_summedoverbins%<>%
+  dplyr::filter(!(fish_id %in% fish2omit))
+```
+
+
+# genotype proportions
+
+Genotype proportions divided by treatment look as even as I could expect which is good. Slightly more FeCit injected fish for wt and hets, and slightly fewer homs overall.
+
+```{r}
+
+#sgshIPgenoproportions <- 
+  final_data %>% 
+  dplyr::select(colnames(meta)) %>% 
+  dplyr::distinct() %>% 
+  group_by(genotype, treatment) %>% 
+  mutate(n = n()) %>% 
+  ggplot(aes(x = genotype)) +
+  geom_bar(aes(fill = treatment), 
+           colour = "black", alpha = 0.5,
+           width = 0.7) +
+  scale_y_continuous(limits = c(0,40), breaks = seq(0,40,4)) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) + 
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 14),
+        legend.key.size = unit(0.8, 'cm'),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt"))) +
+  labs(title = "***sgsh^S387Lfs^***",
+       y = "Number of fish", 
+       x = "Genotype")
+
+saveRDS(sgshIPgenoproportions, "data/R objects/sgshIPgenoproportions.rds")
+
+ggsave(filename = "sgshIPgenoproportions_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+```
+
+
+# fish that died during or after the IP injection 
+
+want to see if genotype influences affect of the IP injections.
+
+```{r}
+meta_dead %>% 
+  dplyr::select(colnames(meta_dead)) %>% 
+  dplyr::distinct() %>% 
+  group_by(genotype, treatment) %>% 
+  mutate(n = n()) %>% 
+  ggplot(aes(x = genotype)) +
+  geom_bar(aes(fill = treatment), 
+           colour = "black", alpha = 0.5,
+           width = 0.7) +
+  scale_fill_viridis_d(option = "D", begin = , end = ) +
+  scale_y_continuous(breaks = seq(0,5,1)) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 14),
+        legend.key.size = unit(0.8, 'cm'),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt"))) +
+  labs(title = "*sgsh* fish dead during or after IP injection",
+       y = "Number of fish", 
+       x = "")
+
+saveRDS(sgshIPdead, "data/R objects/sgshIPdead.rds")
+
+ggsave(filename = "sgshIPdead_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+```
+
+# Locomotor defect
+## Overall total number of turns (summed over the whole hour)
+
+The first readout you can obtain from a y-maze test is a locomotor phenotype. The zantiks machine is currently set up to measure the number of turns (i.e. zone changes), I will see if this is changed across genotypes and treatments. I can re-analyse the video data at a later date to formally measure total distance travelled. 
+
+I will first look at the total number of turns summed over the whole hour.  It doesnt overerly look like there is much difference here in the whole hour. 
+```{r}
+final_data_summedoverbins %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  mutate(total_turns = sum(x)) %>%
+  dplyr::select(colnames(meta), total_turns) %>% 
+  unique %>% 
+  ggplot(aes(x = genotype,y = total_turns)) +
+  geom_violin(aes(fill = genotype),
+               alpha = 0.5) +
+  geom_boxplot(aes(colour = genotype),
+               fill = NA,
+               width = 0.25,
+               colour= "black") +
+  geom_quasirandom(size = 2) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 14),
+        legend.key.size = unit(0.8, 'cm'),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt"))) +
+  scale_fill_viridis_d(option = "viridis") +
+  scale_colour_viridis_d(option = "viridis") +
+  facet_wrap(~treatment) +
+  labs(y = "Total number of turns", 
+       title = "Total number of turns performed by sgsh fish in the Y-maze in 1 hour")
+
+final_data_summedoverbins %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  mutate(total_turns = sum(x)) %>%
+  dplyr::select(colnames(meta), total_turns) %>%
+  unique %>%
+  ggplot(aes(x = treatment,y = total_turns)) +
+  geom_violin(aes(fill = genotype),
+               alpha = 0.5) +
+  geom_boxplot(aes(colour = genotype),
+               fill = NA,
+               width = 0.25,
+               colour= "black") +
+  geom_quasirandom(size = 2) +
+  scale_y_continuous(limits = c(0,1050), breaks = seq(0,1050,100)) +
+  theme(legend.position = "none",
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(0.8, 'cm'),
+        legend.title = element_text(size = 18),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_fill_viridis_d(option = "viridis") +
+  scale_colour_viridis_d(option = "viridis") +
+  facet_wrap(~genotype) +
+  labs(y = "Total number of turns", 
+       title = "Total turns by ***sgsh^S387Lfs^*** fish") 
+
+# not used yet    saveRDS(sgshIPrawturns, "data/R objects/sgshIPrawturns.rds")
+
+ggsave(filename = "sgshIPrawturns_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+
+```
+
+
+I also want to look at whether there is a batch effect of test. There were a total of 12 tests (start times indicated in the plot) performed in one of two zantiks units (139 and 146). Each test contained 8 fish which were randomly assigned. A bit of variation is observed between start times, but this would be expected considering they are performed throughoutthe day, and have had sligtly different environmental conditions (e.g. ,vibrations from the construction, people talking out in the hall etc), as well as circadian differences. 
+
+Ewan: possibly looks like # of turns is dipping slightly towards end of the day, but there's so much variation that this is unlikely to be significant. Will be interesting to look at my hgsnat family in this plot since there were more fish and I was testing later in the day.
+
+```{r}
+final_data_summedoverbins %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  mutate(total_turns = sum(x)) %>%
+  ungroup %>% 
+  dplyr::select(colnames(meta), total_turns) %>%
+  unique %>%
+  ggplot(aes(x = `start_time`, y = total_turns)) +
+  geom_boxplot(aes(fill = `start_time`),
+               outlier.shape = NA,
+               width = 0.25,
+               alpha = 0.5,
+               colour= "black") +
+  geom_jitter(aes(colour = `start_time`),
+              size = 3) +
+  labs(y = "Total number of turns", 
+       title = "Total number of turns performed by sgsh fish in the Y-maze in 1 hour", 
+       subtitle = "According to start time of day of the test")
+```
+
+I also had a look at whether the Genotype and could explain some of the apparent variation within tests. This plot is a bit difficult to interpret quickly. No clear pattern to see, some differences between genotypes over the course of the day are apparent.
+
+```{r}
+final_data_summedoverbins %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  mutate(total_turns = sum(x)) %>%
+  dplyr::select(colnames(meta), total_turns) %>%
+  unique %>%
+  ggplot(aes(x = genotype, y = total_turns)) +
+  geom_violin(aes(fill = genotype),
+               alpha = 0.5) +
+  geom_boxplot(aes(colour = genotype),
+               fill = NA,
+               width = 0.25,
+               colour= "black") +
+  scale_fill_viridis_d(option = "viridis") +
+  scale_colour_viridis_d(option = "viridis") +
+  geom_jitter(aes(shape = treatment), 
+                   size = 3) +
+  facet_wrap(~start_time) +
+  labs(y = "Total number of turns", 
+       title = "Total number of turns performed by sgsh fish in the Y-maze in 1 hour", 
+       subtitle = "According to start time of day of the test")
+```
+
+## statistical test
+
+To test whether the Genotype has a significant effect overall on the total number of turns, I fitted the summed over bins data to a negative binomial generalised linear mixed effect model (negative binomial).
+
+Since the start time of the test doesnt have a logical pattern (i.e. more active in morning), I've included it in the model as a random effect.
+
+Ewan: tried to remove sections of code referring to treatment, and changed any relevant input or column names, however was getting an error: Error in xml_children(x)[[search]] : subscript out of bounds
+
+
+
+```{r}
+# also look at the total number of turns (without the bins)
+sgsh_FeCit_turns_glm_nobins <- final_data_summedoverbins %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  mutate(total_turns = sum(x)) %>%
+  dplyr::select(colnames(meta), total_turns) %>% 
+  unique  %>%
+  ungroup %>% 
+  glmer.nb(total_turns ~ genotype*treatment + tank + sex + (1|fish_id),
+         data = .)
+
+Anova(sgsh_FeCit_turns_glm_nobins) %>% 
+  signif(digits = 2) %>% 
+  kable %>% 
+  kable_styling(full_width = F) %>% 
+  row_spec(color = "red", row = c(1, 3))
+
+print(emmeans(sgsh_FeCit_glm_timebyturns2, ~ genotype * treatment), type = "response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = response, colour = treatment)) +
+  geom_col(aes(fill = genotype), 
+           alpha = 0.5,
+           width = 0.75,
+           position = position_dodge()) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.125,
+                size = 1,
+                position = position_dodge(width = 0.75)) +
+  theme(axis.text.x = element_text(hjust = 1,
+                               vjust = 1,
+                               angle = 45), 
+        legend.position = "bottom") +
+  scale_color_viridis_d(end = 0.8, option = "inferno") +
+  scale_fill_viridis_d(end = 0.8, option = "inferno") +
+  labs(y = "GLM predicted total number of turns",
+       x = "Genotype", 
+       title = "GLM predicted total number of turns performed by sgsh aged zebrafish", 
+       subtitle = "p = 0.25"
+       )
+
+```
+
+## turns across the hour. 
+
+I also want to look at whether the fish display changes to activity across the hour (i.e. are they more active when they are first placed in the maze?). 
+
+
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, 
+             y = total_turns)) +
+  
+  geom_boxplot(aes(fill = genotype,
+       colour = genotype), 
+       position = "dodge",
+           alpha = 0.4,
+           outlier.shape = NA) +
+  
+   geom_point(aes(colour = genotype, fill = genotype), 
+              alpha = 0.4,
+             position = position_jitterdodge()) +
+  
+    geom_smooth(aes(group = genotype, colour = genotype, fill = genotype), se = F) +
+  
+  geom_label_repel(aes(label = fish_id), data = . %>% 
+                     dplyr::filter(total_turns>300)) +
+  
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  labs(title = "Number of turns performed by zebrafish across an hour ", 
+       subtitle = "According to Genotype at sgsh S387Lfs",
+       y = "Number of turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75)
+```
+
+# treatment plots 
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    ), 
+    genotreat = paste0(genotype, "_", treatment)) %>% 
+  ggplot(aes(x = binforvis, 
+             y = total_turns, 
+             fill = genotreat, 
+             colour = genotreat)) +
+  geom_boxplot(position = "dodge",
+           alpha = 0.4,
+           outlier.shape = NA) +
+   geom_point(aes(colour = genotreat), 
+              alpha = 0.4,
+             position = position_jitterdodge()) +
+    geom_smooth(aes(group = genotreat), se = F) +
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  labs(title = "Number of turns performed by zebrafish across an hour ", 
+       subtitle = "Accoring to Treatment and Genotype",
+       y = "Number of turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75)
+```
+
+
+Turns across hour between treatments subset by genotype. The group that shows the most apparent difference between treatment groups are the homs. Still very noisy data so not sure if anything significant is there.
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = total_turns)) +
+  geom_boxplot(aes(fill = treatment),
+               position = "dodge",
+               alpha = 0.5,
+               outlier.shape = NA) +
+  geom_point(aes(colour = treatment), 
+             position = position_jitterdodge()) +
+  geom_smooth(aes(group = treatment, 
+                  colour = treatment), 
+              se = F) +
+  facet_wrap(~genotype, nrow = 1, scales = "free_x")+
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, vjust = 1)) +
+  labs(title = "Number of turns performed by zebrafish across an hour ", 
+       subtitle = "Accoring to Treatment and Genotype",
+       y = "Number of turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75)
+```
+
+Finally, want to vis within Treatments. Broadly speaking, saline and FeCit groups look fairly similar
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = total_turns)) +
+  geom_boxplot(aes(fill = genotype),
+               position = "dodge",
+               alpha = 0.5,
+               outlier.shape = NA) +
+  geom_point(aes(colour = genotype), 
+             position = position_jitterdodge()) +
+  facet_wrap(~treatment, nrow = 1)+
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, vjust = 1)) +
+  labs(title = "Number of turns performed by zebrafish across an hour ", 
+       subtitle = "Accoring to Treatment and Genotype",
+       y = "Number of turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75) 
+  #ggsave("output/FeCit_turnsAcrossHour.png", width = 15, height = 5, units = "cm", dpi = 200, scale = 2)
+```
+
+
+## statistical test
+
+To test whether the Genotype and/or Treatment have a significant effect overall on the total number of turns, I fitted the per bin data to a negative binomial generalised linear mixed effect model. Since the start time of the test doesnt have a logical pattern (i.e. mrore active in morning), I've included it in the model as a random effect. 
+The bin has a highly significant effect on the total turns. This is consistent with what we have seen in the past using this test. The fish are more active when they first enter the maze and it drops off as they become more accustomed to it. The effect of genotype is also statistically signnificant. . The genotype:treatment:bin effect 
+
+
+
+```{r }
+#saving this object out as it does not let the rmarkdown doc run.
+
+sgsh_FeCit_turns_glm_2randomeffects <- final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>%
+  mutate(bin = case_when(
+    bin == 1 ~ "0-10",
+    bin == 2 ~ "10-20",
+    bin == 3 ~ "20-30",
+    bin == 4 ~ "30-40",
+    bin == 5 ~ "40-50",
+    bin == 6 ~ "50-60"
+    )) %>%
+   glmer.nb(total_turns ~ genotype*treatment*bin + sex + tank + (1|fish_id) + (1|start_time),
+         data = .)
+
+sgsh_FeCit_turns_glm_JUST_fishid <- final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>%
+  mutate(bin = case_when(
+    bin == 1 ~ "0-10",
+    bin == 2 ~ "10-20",
+    bin == 3 ~ "20-30",
+    bin == 4 ~ "30-40",
+    bin == 5 ~ "40-50",
+    bin == 6 ~ "50-60"
+    )) %>%
+   glmer.nb(total_turns ~ genotype*treatment*bin + sex + tank + (1|fish_id),
+         data = .)
+
+sgsh_FeCit_turns_glm_JUST_starttime <- final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = TRUE) %>%
+  mutate(bin = case_when(
+    bin == 1 ~ "0-10",
+    bin == 2 ~ "10-20",
+    bin == 3 ~ "20-30",
+    bin == 4 ~ "30-40",
+    bin == 5 ~ "40-50",
+    bin == 6 ~ "50-60"
+    )) %>%
+   glmer.nb(total_turns ~ genotype*treatment*bin + sex + tank + (1|start_time),
+         data = .)
+
+sgsh_FeCit_turns_glm_2randomeffects %>% saveRDS("data/R_objects/sgsh_FeCit_turns_glm_2randomeffects.rds")
+
+# re-import this object
+sgsh_FeCit_turns_glm <- read_rds("data/R_objects/sgsh_FeCit_turns_glm.rds")
+
+# when I include fish_id as a random effect, I get this error:
+
+# boundary (singular) fit: see help('isSingular')
+
+# some online research suggests this is because that random effect is super small and overcomplicating the model. INVESTIGATE
+
+# LR test (likelihood ratio) from lmtest package to compare suitability between the glms with and without the fish_id random effect
+
+# Likelihood ratio test
+# 
+# Model 1: total_turns ~ genotype * treatment * bin + sex + tank + (1 | 
+#     fish_id)
+# Model 2: total_turns ~ genotype * treatment * bin + sex + tank + (1 | 
+#     fish_id) + (1 | start_time)
+#   #Df LogLik Df Chisq Pr(>Chisq)
+# 1  43  -2237                    
+# 2  44  -2237  1     0     0.9996
+
+lrtest(sgsh_FeCit_turns_glm_JUST_starttime, sgsh_FeCit_turns_glm_2randomeffects)
+
+#conclusion using lrtest: the problem was start_time. The effect size was so small, and the model was becoming singular/overfitted 
+# based off the lrtest, it is most optimal to include fish_id only, not both random effects.
+
+
+sgsh_FeCit_turns_glm %>% saveRDS("data/R_objects/sgsh_FeCit_turns_glm.rds")
+
+# re-import this object
+sgsh_FeCit_turns_glm <- read_rds("data/R_objects/sgsh_FeCit_turns_glm.rds")
+
+
+sgsh_FeCit_turns_glm_JUST_fishid_anova <- 
+  Anova(sgsh_FeCit_turns_glm_JUST_fishid) %>% 
+ signif(digits = 2) #%>%
+  #kable %>%
+  #kable_styling(full_width = F)
+  #%>% 
+  # row_spec(color = "red", row = c(1, 3, 4))
+
+# saving the anova values table as a csv for paper tables
+
+write.csv(sgsh_FeCit_turns_glm_JUST_fishid_anova, "/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/output/sgsh_FeCit_turns_glm_JUST_fishid_anova.csv", row.names = TRUE)
+
+# effect of genotype and treatment over the time bins
+
+print(emmeans(sgsh_FeCit_turns_glm_JUST_fishid, ~ genotype * treatment * bin), type = "response") %>% 
+  as_tibble() %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = bin, y = response, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 5,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  geom_smooth(aes(group = treatment, colour = treatment, fill = treatment), alpha = 0.5, se = T, size = 2) +
+  facet_wrap(~genotype, nrow = 1) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "none",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(1.2, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 12, face = "bold", hjust = 0.5,
+                               vjust = 0,
+                               angle = 0),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_y_continuous(limits = c(0,210), breaks = seq(0,210,25)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Predicted turns per time bin",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of time bin **p < 0.001**, treatment * time bin **p = 0.76**, genotype * treatment * time bin **p = 0.67** "
+       )
+
+ggsave(filename = "sgshIPmodel_turnsacrossbins_figV3_fishid_genofacet.svg", path = "output/fishid_model_turns", width = 12, height = 4, dpi = 300)
+
+# Effect of genotype and treatment
+
+print(emmeans(sgsh_FeCit_turns_glm_JUST_fishid, ~ genotype * treatment), type ="response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = response, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 10,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "bottom",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(0.8, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 20, face = "bold", hjust = 0.5,
+                               vjust = 1),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt"))) +
+        
+  scale_y_continuous(limits = c(0,131), breaks = seq(0,131,10)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Predicted turns per time bin",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of genotype **p = 0.014**, treatment **p = 0.65**, geno * treat **p = 0.43**"
+       )
+
+ggsave(filename = "sgshIPmodel_combinedturnsV3_fishid.svg", path = "output/fishid_model_turns", width = 6, height = 6, dpi = 300)
+
+
+#effect of sex was not significant, although males appeared to consistently perform more turns
+
+print(emmeans(sgsh_FeCit_turns_glm_JUST_fishid, ~ treatment * sex), type ="response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = sex, y = response, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 8,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  #facet_wrap(~treatment, nrow = 1) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "bottom",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(0.8, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 20, face = "bold", hjust = 0.5,
+                               vjust = 1),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(0, 0, -20, 0), "pt")),
+        strip.text = element_markdown(size = 16, face = "bold")) +
+  scale_y_continuous(limits = c(0,100), breaks = seq(0,101,10)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "predicted average turns per bin",
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of sex **p = 0.17**"
+       )
+
+ggsave(filename = "sgshIPmodel_turns_sex_figV2.svg", path = "output/fishid_model_turns", width = 6, height = 6, dpi = 300)
+
+```
+
+## are the mutants more likely to be "non responders"
+
+Some fish may not repsond to this test, So first I will have a look if there are any fish which seem to just sit there and not move for the whole hour. Here, I will define a fish to be a "non-responder" if they perfomed less than 60 turns in the test (so less than 1  per minuye). 
+
+First, I will plot the totalturns per bin per fish as a line plot. There does seem to be some fish which show a relatively straight line around 10 total turns. 
+```{r}
+final_data %>% 
+  ggplot(aes(x = bin, y = total_turns)) +
+  geom_line(aes(colour = fish_id), show.legend = F) +
+  facet_wrap(~genotype*treatment, nrow = 1)
+```
+
+
+Can use the below code to define non-responsive fish (under a certain total turn number). There is only 1 hom under 200 total turns, 6 wt and 4 hets. So it seems that homozygotes for the sgsh S387Lfs mutation are less likely to be non-responders. This fits in with the hyperactivity phenotype I saw across our mutants during my non-treated aged testing.
+ 
+```{r}
+final_data %>% 
+  dplyr::select(!grep(colnames(final_data), pattern = "[L|R]{4}")) %>% #unsleect the tetras cols to make my life easier right now. 
+  group_by(fish_id) %>% 
+  mutate(nonresp = sum(total_turns) < 200) %>% 
+  dplyr::select(fish_id, nonresp) %>% 
+  unique %>% 
+  dplyr::filter(nonresp == TRUE) %>% 
+  left_join(meta %>% dplyr::select(fish_id, genotype, treatment)) %>% 
+  kable %>% 
+  kable_styling(full_width = F)
+```
+
+
+# time spent in each zone of the Y-maze
+
+I next will assess whether fish in each maze spend more or less time in each zone of the Y-maze (i.e. in each arm of the maze or the middle). This is also kind of representitve of locomotion, as they might spend longer in each arm of the maze if the swim speed was slower. 
+
+Less time in zone 4 (the middle zone) as expected since the area is smaller and the fish tend to just pass through.
+
+There are a few wt and het fish that seem to have spent much less time in the middle zone 4 than other fish. 0.1 minutes is 6 seconds which isn't long over a whole hour. Should check these out
+
+```{r}
+read_csv("/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/data/processed_data/time_in_zone.csv") %>%
+  mutate(fish_id = as.character(fish_id)) %>%
+  dplyr::select(fish_id, bin, zone, time_in_zone) %>% 
+  left_join(meta) %>%
+  dplyr::filter(genotype %in% c("wt", "het", "hom")) %>% 
+  dplyr::filter(zone %in% c(1:4)) %>% 
+  group_by(fish_id, zone) %>%
+  mutate(total_timeInZone = sum(time_in_zone), 
+         zone = paste0("zone ", zone)) %>%
+  dplyr::distinct(fish_id, zone, .keep_all = TRUE) %>%
+  ggplot(aes(x = treatment, y = total_timeInZone/60)) +
+  geom_quasirandom(aes(colour = genotype)
+                  ) +
+  geom_boxplot(aes(fill = genotype),
+               outlier.shape = NA,
+                alpha = 0.5) +
+  facet_wrap(~zone, nrow = 1) +
+  scale_y_log10() +
+  scale_fill_viridis_d(end = 0.75) +
+  scale_colour_viridis_d(end = 0.75) +
+  easy_rotate_x_labels(angle = -45) +
+  labs(y = "Total time spent in each zone (mins, log scale)", 
+       title = "Total time spent in each zone")
+```
+
+I was curious to see whether which maze the fish were in (i.e. top left, middle etc) would have an effect on whether they spend more or less time in one of the arms of the mazes. There are 8 ymazes in each zantiks unit. inspection of the total time spent in each zone of the maze across the 8 possible positions in the zantiks unit didnt reveal any trends. 
+
+Each arena seems to present pretty much the same. Possibly arena 3 has some weird stuff going on in zone 4 (the middle), however the sample size is small
+
+```{r}
+read_csv("/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/data/processed_data/time_in_zone.csv") %>%
+  mutate(fish_id = as.character(fish_id)) %>%
+  dplyr::select(fish_id, bin, zone, time_in_zone) %>%
+  left_join(meta) %>%
+  dplyr::filter(genotype %in% c("wt", "het", "hom")) %>% 
+  dplyr::filter(zone %in% c(1:4)) %>% 
+  group_by(fish_id, zone) %>%
+  mutate(total_timeInZone = sum(time_in_zone), 
+         zone = paste0("zone ", zone)) %>%
+  dplyr::distinct(total_timeInZone, .keep_all = TRUE) %>%
+  ggplot(aes(x = zone, y = total_timeInZone/60)) +
+  geom_quasirandom(aes(colour = genotype, shape = treatment), 
+                   size = 2
+                  ) +
+  geom_boxplot(aes(fill = genotype),
+               outlier.shape = NA,
+                alpha = 0.5) +
+  facet_wrap(~arena_position) +
+  scale_y_log10() +
+  scale_fill_viridis_d(end = 0.75) +
+  scale_colour_viridis_d(end = 0.75) +
+  easy_rotate_x_labels(angle = -45) +
+  labs(y = "Total time spent in each zone (mins, log scale)", 
+       title = "Total time spent in each zone", 
+       subtitle = "accoring to position in the ymaze")
+```
+
+I alslo wanted to look at the average time spent in each zone. 
+
+```{r}
+read_csv("/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/data/processed_data/time_in_zone.csv") %>%
+  mutate(fish_id = as.character(fish_id)) %>%
+  dplyr::select(fish_id, bin, zone, time_in_zone) %>%
+  left_join(meta) %>%
+  group_by(fish_id, zone) %>%
+  dplyr::filter(genotype %in% c("wt", "het", "hom")) %>% 
+  dplyr::filter(zone %in% c(1:4)) %>% 
+  mutate(aveTimeInZone = mean(time_in_zone), 
+         zone = paste0("zone ", zone)) %>%
+  dplyr::distinct(aveTimeInZone, .keep_all = TRUE) %>%
+  ggplot(aes(x = genotype, y =aveTimeInZone)) +
+  geom_quasirandom(aes(colour = genotype, shape = treatment)
+                  ) +
+  geom_boxplot(aes(fill = genotype),
+               outlier.shape = NA,
+                alpha = 0.5) +
+  facet_wrap(~zone, nrow = 1) +
+  scale_y_log10() +
+  scale_fill_viridis_d(end = 0.75) +
+  scale_colour_viridis_d(end = 0.75) +
+  easy_rotate_x_labels(angle = -45) +
+  labs(y = "Average time spent in each zone (mins, log scale)", 
+       title = "Average time spent in each zone")
+
+```
+
+## Statistical test
+
+Here, I fit the average time spent in each zone of the maze to a linear mixed effect model. The `Genotype x treatment x zone` effect has a p value of , while the genotype x treatment p value is 0.09. All other effects have much higher p values (apart from zone of course)
+
+```{r}
+
+fit <- read_csv("/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/data/processed_data/time_in_zone.csv") %>%
+  mutate(fish_id = as.character(fish_id)) %>%
+  #dplyr::filter(!(fish_id %in% fish2omit)) %>% 
+  dplyr::filter(time_in_zone >=0) %>%  # omit the buggy shit with the negative times
+  dplyr::select(fish_id, bin, zone, time_in_zone) %>% 
+  left_join(meta) %>%
+  dplyr::filter(genotype %in% c("wt", "het", "hom")) %>% 
+  dplyr::filter(zone %in% c(1:4)) %>% 
+  group_by(fish_id, zone) %>%
+  mutate(total_timeInZone = sum(time_in_zone),
+         logtimezone = log(total_timeInZone),
+         zone = paste0("zone ", zone)) %>%
+  dplyr::distinct(fish_id, zone, .keep_all = TRUE) %>% 
+  lmer(logtimezone ~ (genotype + treatment + zone)^3 + arena_position + (1|`start_time`),
+    data = .)
+
+
+Anova(fit) %>% 
+  signif(2) %>% 
+  kable(caption = "linear mixed model: time_in_zone ~ (Genotype + Treatment + zone)^3 + (1|`start time`)" ) %>%
+  kableExtra::row_spec(row = 8, bold = TRUE) %>% 
+  kable_styling(full_width = FALSE)
+
+```
+
+# check for handedness
+
+Fontana et al. (https://doi.org/10.1007/s10071-019-01296-9, Matt Parker's group) showed that fish sometimes show a behavioural lateralisation (i.e. handedness). If fish show this, then they would perform less alternation tetragrams not due to working memory.
+
+The plot below circles each of the L_R bias groups. 
+
+```{r}
+# make the LR bias object
+LR_Bias <- final_data %>%
+  dplyr::select(L, R, total_turns, fish_id) %>%
+  group_by(fish_id) %>%
+  mutate(L = sum(L),
+         R = sum(R),
+         total_turns = sum(total_turns),
+         L_R_bias = case_when( #consider more than 60% of the time performing a 
+           #left or right turn to be a bias
+           L/total_turns > 0.6 ~ "Left",
+           R/total_turns > 0.6 ~ "Right",
+           TRUE ~ "Neither"
+         )) %>%
+  dplyr::select(fish_id, L_R_bias) %>%
+  unique() %>%
+  mutate(L_R_bias = factor(L_R_bias,
+                           levels = c("Neither", "Left", "Right"))
+  )
+```
+
+
+```{r}
+#by genotype
+
+ggarrange(
+final_data %>%
+  left_join(LR_Bias) %>%
+  group_by(fish_id) %>%
+  mutate(L = sum(L),
+         R = sum(R),
+         total_turns = sum(total_turns)
+  ) %>%
+  ggplot(aes(L, R)) +
+  geom_point(aes(shape = L_R_bias, colour = genotype),
+             size = 4) +
+  geom_mark_ellipse(aes(fill = L_R_bias, label = L_R_bias),
+                 alpha = 0.2, 
+                 con.cap = 0) +
+  labs(title = "By Genotype") +
+  scale_color_viridis_d(end = 0.75) +
+  theme(legend.position = "left", 
+        aspect.ratio = 1) +
+  scale_fill_viridis_d(option = "plasma"))
+
+#by treatment
+
+final_data %>%
+  left_join(LR_Bias) %>%
+  group_by(fish_id) %>%
+  mutate(L = sum(L),
+         R = sum(R),
+         total_turns = sum(total_turns)
+  ) %>%
+  ggplot(aes(L, R)) +
+  geom_point(aes(shape = L_R_bias, colour = treatment),
+             size = 4) +
+  geom_mark_ellipse(aes(fill = L_R_bias, label = L_R_bias),
+                 alpha = 0.2, 
+                  con.cap = 0)+
+  labs(title = "By Treatment") +
+  scale_color_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(option = "plasma") +
+  theme(legend.position = "right", 
+        aspect.ratio = 1)
+```
+
+
+
+```{r}
+final_data %>%
+  left_join(LR_Bias) %>%
+  group_by(fish_id) %>%
+  mutate(L = sum(L),
+         R = sum(R),
+         total_turns = sum(total_turns), 
+         genotreat = paste0(genotype, "_", treatment)
+        
+  ) %>% 
+  ggplot(aes(x = genotreat, fill = L_R_bias )) +
+  geom_bar()
+```
+
+# test for changes to alternation
+
+Cleal et al. showed that zebrafish naturally perform more of the alternation tetragrams (LRLR and RLRL) in a Y-maze. Here, we actually see more reps that alts. I will look at this more closely later. 
+
+```{r}
+
+#faceted by treatment groups
+
+final_data_summedoverbins %>%
+  dplyr::distinct(x, .keep_all = T) %>%
+  ggplot(aes(x = tetras, y = x)) +
+  geom_jitter(aes(colour = tetras,
+                  shape = sex)) +
+  geom_boxplot(outlier.shape = NA,
+               fill = NA
+               ) +
+  facet_wrap(~treatment, ncol = 1) +
+  scale_fill_viridis_d() +
+  scale_y_continuous(limits = c(0,750), breaks = seq(0,750,100)) +
+  labs(y = "Number of tetragrams",
+       colour = "Tetragram",
+       x = "Tetragram")+
+  theme(legend.position = "none",
+        plot.title = element_markdown(size = 14, hjust = 0.5), 
+        plot.subtitle = element_markdown(hjust = 0.5),
+        strip.text = element_markdown(size = 16, face = "bold")) +
+        labs(title = "Tetragram frequency of IP-injected ***sgsh^S387Lfs^*** zebrafish
+             in the Y-maze during 1 hour ", y = "tetragram frequency")
+
+ggsave(filename = "sgshIP_tetras_treatmentFacet_figV1.svg", path = "output", width = 12, height = 6, dpi = 300)
+
+# everything together
+
+final_data_summedoverbins %>%
+  dplyr::distinct(x, .keep_all = T) %>%
+  ggplot(aes(x = tetras, y = x)) +
+  geom_jitter(aes(colour = tetras,
+                  shape = sex)) +
+  geom_boxplot(outlier.shape = NA,
+               fill = NA
+               ) +
+  scale_fill_viridis_d() +
+  scale_y_continuous(limits = c(0,750), breaks = seq(0,750,100)) +
+  labs(y = "Number of tetragrams",
+       colour = "Tetragram",
+       x = "Tetragram")+
+  theme(legend.position = "none",
+        plot.title = element_markdown(size = 14, hjust = 0.5), 
+        plot.subtitle = element_markdown(hjust = 0.5)) +
+        labs(title = "Tetragram frequency of IP-injected ***sgsh^S387Lfs^*** zebrafish
+             in the Y-maze during 1 hour ", y = "tetragram frequency")
+
+ggsave(filename = "sgshIP_tetras_figV1.svg", path = "output", width = 12, height = 4, dpi = 300)
+
+```
+
+We can also overlay the genotype boxplots as shown below.
+
+```{r}
+final_data_summedoverbins %>%
+  ggplot(aes(x = tetras, y = x)) +
+  geom_jitter(aes(colour = tetras,
+                  shape = sex)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype),
+               alpha = 0.5,
+               ) +
+  scale_fill_viridis_d() +
+  labs(y = "Number of tetragrams",
+       colour = "Tetragram",
+       x = "Tetragram")+
+  theme(legend.position = "bottom")  +
+  facet_wrap(~treatment, ncol = 1) +
+  easy_rotate_x_labels(angle = -45) +
+  annotate("rect", # add some boxes around the alts 
+           xmin = 5.5, xmax = 6.5, 
+           ymin = -1, ymax = 600, 
+             alpha = 0, color= "red") +
+  annotate("rect", 
+           xmin = 10.5, xmax = 11.5, 
+           ymin = -1, ymax = 200,
+           alpha = 0, color= "red") +
+  ggtitle("Total number of 16 possible tetragrams performed by zebrafish in a Y-maze\nduring a 1 hour search period") 
+```
+
+The alternation tetragrams are the tetragram of interest (the measure of working memory). Below indicates the number of tetragrams performed by zebrafish across the 6 x 10 min blocks of the hour they spent in the maze.
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = T) %>%
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = treatment, y = alts)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype), 
+               alpha = 0.5) +
+  geom_point(aes(colour = genotype), 
+             position = position_jitterdodge()) +
+  facet_wrap(~binforvis, nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  ylab("Frequency of alternation tetragrams (LRLR + RLRL)") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75) 
+  
+```
+
+We can also display this as the *relative* amount of alternation tetragrams performed by zebrafish in a 1 hour search period. This will control for how active each fish is.
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = T) %>%
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = treatment, y = rel_alts)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype), 
+               alpha = 0.5) +
+  geom_point(aes(colour = genotype), 
+             position = position_jitterdodge()) +
+  facet_wrap(~binforvis, nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  ylab("Relative number of alternation tetragrams\n(LRLR + RLRL) / total_turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75) 
+```
+
+# combined raw counts of alts and reps for supplementary
+
+```{r}
+final_data %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  summarise(alts = sum(alts), reps = sum(reps), 
+            treatment = first(treatment), genotype = first(genotype)) %>%
+  #dplyr::select(colnames(meta), alts) %>%
+  unique %>%
+  ggplot(aes(x = treatment,y = alts)) +
+  geom_violin(aes(fill = genotype),
+               alpha = 0.5) +
+  geom_boxplot(aes(colour = genotype),
+               fill = NA,
+               width = 0.25,
+               colour= "black") +
+  geom_quasirandom(size = 2) +
+  scale_y_continuous(limits = c(0,550), breaks = seq(0,550,50)) +
+  theme(legend.position = "none",
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(0.8, 'cm'),
+        legend.title = element_text(size = 18),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_fill_viridis_d(option = "viridis") +
+  scale_colour_viridis_d(option = "viridis") +
+  facet_wrap(~genotype) +
+  labs(y = "Alternation tetragram frequency", 
+       title = "Total alternations by ***sgsh^S387Lfs^*** fish") 
+
+# not used yet    saveRDS(sgshIPrawalts, "data/R objects/sgshIPrawturns.rds")
+
+ggsave(filename = "sgshIPrawalts_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+
+final_data %>%
+  ungroup() %>%
+  group_by(fish_id) %>%
+  summarise(alts = sum(alts), reps = sum(reps), 
+            treatment = first(treatment), genotype = first(genotype)) %>%
+  #dplyr::select(colnames(meta), reps) %>%
+  unique %>%
+  ggplot(aes(x = treatment,y = reps)) +
+  geom_violin(aes(fill = genotype),
+               alpha = 0.5) +
+  geom_boxplot(aes(colour = genotype),
+               fill = NA,
+               width = 0.25,
+               colour= "black") +
+  geom_quasirandom(size = 2) +
+  scale_y_continuous(limits = c(0,550), breaks = seq(0,550,50)) +
+  theme(legend.position = "none",
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(0.8, 'cm'),
+        legend.title = element_text(size = 18),
+        plot.title = element_markdown(size = 22, hjust = 0.5),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 18, face = "bold"),
+        axis.title.y = element_markdown(size = 20),
+        axis.title.x = element_markdown(size = 20, margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_fill_viridis_d(option = "viridis") +
+  scale_colour_viridis_d(option = "viridis") +
+  facet_wrap(~genotype) +
+  labs(y = "Repetition tetragram frequency", 
+       title = "Total repetitions by ***sgsh^S387Lfs^*** fish") 
+
+# not used yet    saveRDS(sgshIPrawalts, "data/R objects/sgshIPrawturns.rds")
+
+ggsave(filename = "sgshIPrawreps_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+
+```
+
+KB: Finally, I will now test for alternation changes using a generalised linear mixed effect model (beta-binomial distribution). We use this because it is count data which is over-dispersed, and fixed and random effects are included. The link function is logit.
+
+No significant effects are observed on working memory. Only the `L_R_bias` term is significant, this is to be expected, as they would probably be performing more repetitions. 
+
+Note that I have ignored the effect of Sex here. We have never really seen a Sex effect in all of our ymaze analyses.
+
+EG:
+
+# Alternation model
+
+```{r}
+# where I've added BIAS that is just from checking the interaction of laterality
+# and genotype etc ages after I first did the analysis. Didn't want to overwrite
+# the original object names
+
+sgsh_FeCit_glm_alts <-
+  final_data %>%
+  left_join(LR_Bias) %>%
+  mutate(
+    non_alts = total_turns - alts,
+    bin = as.factor(bin)
+  ) %>%
+    mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>%
+  glmmTMB(
+    cbind(alts, non_alts) ~ (bin + genotype + treatment)^4 + L_R_bias + tank + sex + (1|start_time) + (1|fish_id),
+    family = betabinomial(),
+    data = .
+  )
+
+check_model(sgsh_FeCit_glm_altsBIAS)
+check_convergence(sgsh_FeCit_glm_alts)
+AICc(sgsh_FeCit_glm_alts)
+isSingular(sgsh_FeCit_glm_alts)
+summary(sgsh_FeCit_glm_alts)
+simulateResiduals(sgsh_FeCit_glm_alts) %>% plot()
+
+
+#don't work below
+plot(sgsh_FeCit_glm_alts)
+residuals(sgsh_FeCit_glm_alts) %>% plot()
+
+#chisq separate for LR bias and geno and treatment
+
+final_dataBIAS <- 
+  final_data %>%
+  left_join(LR_Bias)
+
+summary(table(final_dataBIAS$L_R_bias, final_dataBIAS$genotype))
+
+chisq_sgsh <- table(final_dataBIAS$L_R_bias, final_dataBIAS$genotype) %>%
+  chisq.test() %>% 
+  as.data.frame() %>%
+  signif(digits = 3)
+
+sgsh_FeCit_glm_alts_anova <- Anova(sgsh_FeCit_glm_altsBIAS) %>%
+  as.data.frame() %>%
+  signif(digits = 3)
+
+# saving the anova values table as a csv for paper tables
+
+write.csv(sgsh_FeCit_glm_alts_anova, "/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/output/sgsh_FeCit_glm_alts_anova.csv", row.names = TRUE)
+
+```
+
+## Visualisation 
+
+# genotype only
+
+```{r}
+print(emmeans(sgsh_FeCit_glm_alts, ~ genotype + L_R_bias), type = "response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = prob, colour = L_R_bias)) +
+  geom_col(aes(fill = L_R_bias), 
+           alpha = 0.5,
+           width = 0.75,
+           position = position_dodge()) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL),
+                width = 0.125,
+                size = 1,
+                position = position_dodge(width = 0.75)) +
+  theme(axis.text.x = element_text(size = 18, face = "bold", hjust = 0.5,
+                               vjust = 1),
+        legend.position = "bottom") +
+  scale_color_viridis_d(end = 0.8, option = "inferno") +
+  scale_fill_viridis_d(end = 0.8, option = "inferno") +
+  labs(y = "Estimated alternation probability \n(LRLR + RLRL)",
+       x = "genotype", 
+       title = "GLM predicted probability of sgsh fish performing an alternation\ntetragram due to genotype and LR bias", 
+       subtitle = "geno*bias p = 0.027"
+       )
+```
+
+### genotype * treatment 
+
+
+
+```{r}
+print(emmeans(sgsh_FeCit_glm_alts, ~ genotype * treatment), type = "response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = prob, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 10,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "bottom",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(0.8, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 20, face = "bold", hjust = 0.5,
+                               vjust = 1),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt"))) +
+        
+  scale_y_continuous(limits = c(0,0.25), breaks = seq(0,0.25,0.025)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Estimated alternation probability",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of genotype **p = 0.42**, treatment **p = 0.23**, geno * treat **p = 0.89**"
+       )
+
+ggsave(filename = "sgshIPmodel_combinedaltsV2.svg", path = "output", width = 6, height = 6, dpi = 300)
+
+```
+
+
+### bin x Genotype x Treatment
+
+Not significant
+
+```{r}
+
+print(emmeans(sgsh_FeCit_glm_alts, ~ genotype * treatment * bin), type = "response") %>% 
+  as_tibble() %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = prob, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 5,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  geom_smooth(aes(group = treatment, colour = treatment, fill = treatment), alpha = 0.5, se = T, size = 2) +
+  facet_wrap(~genotype, nrow = 1) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "none",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(1.2, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 12, face = "bold", hjust = 0.5,
+                               vjust = 0,
+                               angle = 0),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_y_continuous(limits = c(0,0.33), breaks = seq(0,0.33,0.025)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Estimated alternation probability ",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of time bin **p = 0.23**, time bin * treatment **p = 0.83**, time bin * treatment * genotype **p = 0.88**"
+       )
+
+ggsave(filename = "sgshIPmodel_alts_acrossbins.svg", path = "output", width = 12, height = 4, dpi = 300)
+```
+
+### L or R bias
+```{r}
+print(emmeans(sgsh_FeCit_glm_alts, specs = "L_R_bias"), type = "response") %>%
+  as_tibble() %>%
+  ggplot(aes(L_R_bias, prob, colour = L_R_bias)) +
+  geom_col(aes(fill = L_R_bias),
+           alpha = 0.5,
+           position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL),
+                width = 0.125,
+                size = 1,
+                position = position_dodge(width = 0.75)) +
+  ylab("Estimated alternation probability ") +
+  xlab("Time interval") +
+  theme(
+    axis.text.x = element_text(hjust = 1,
+                               vjust = 1,
+                               angle = 45)
+    ) +
+  scale_y_continuous(limits = c(0,0.27)) +
+  scale_color_viridis_d(end = 0.8, option = "viridis") +
+  scale_fill_viridis_d(end = 0.8, option = "viridis") +
+  ggtitle("GLM predicted probability of zebrafish performing an alternation\ntetragram due to having a LR bias",
+          subtitle = "Effect of L or R Bias p < 0.000")
+```
+
+# test for changes in repetitions
+
+Repetitions are a sign of stress. Matt Parker says he sees increased repetitions when fish are pre-treated with a chemogenic stressor. Looking at the total number of tetragrams performed, our fish in this exp seem to be performing more reps.  
+
+```{r}
+final_data_summedoverbins %>%
+  dplyr::distinct(fish_id, tetras, .keep_all = T) %>%
+  ggplot(aes(x = tetras, y = x)) +
+  geom_jitter(aes(colour = tetras,
+                  shape = sex)) +
+  geom_boxplot(outlier.shape = NA,
+               fill = NA
+               ) +
+  scale_fill_viridis_d() +
+  labs(y = "Number of tetragrams",
+       colour = "Tetragram",
+       x = "Tetragram")+
+  theme(legend.position = "none")  +
+  ggtitle("Total number of 16 possible tetragrams performed by zebrafish in a Y-maze\nduring a 1 hour search period") 
+```
+
+Same graph but overlaid genotypes
+```{r}
+final_data_summedoverbins %>%
+  ggplot(aes(x = tetras, y = x)) +
+  geom_jitter(aes(colour = tetras,
+                  shape = sex)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype),
+               alpha = 0.5,
+               ) +
+  scale_fill_viridis_d() +
+  labs(y = "Number of tetragrams",
+       colour = "Tetragram",
+       x = "Tetragram")+
+  theme(legend.position = "bottom")  +
+  easy_rotate_x_labels(angle = -45) +
+  annotate("rect", # add some boxes around the reps 
+           xmin = 0.5, xmax = 1.5, 
+           ymin = -1, ymax = 600, 
+             alpha = 0, color= "red") +
+  annotate("rect", 
+           xmin = 15.5, xmax = 16.5, 
+           ymin = -1, ymax = 600,
+           alpha = 0, color= "red") +
+  ggtitle("Total number of 16 possible tetragrams performed by zebrafish in a Y-maze\nduring a 1 hour search period") 
+```
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = T) %>%
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = treatment, y = reps)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype), 
+               alpha = 0.5) +
+  geom_point(aes(colour = genotype), 
+             position = position_jitterdodge()) +
+  facet_wrap(~binforvis, nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  ylab("Frequency of repetition tetragrams (LLLL + RRRR)") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75) 
+  
+```
+
+We can also display this as the *relative* amount of repetition tetragrams performed by zebrafish in a 1 hour search period. This will control for how active each fish is.
+
+```{r}
+final_data_long %>%
+  dplyr::distinct(fish_id, bin, .keep_all = T) %>%
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = treatment, y = rel_reps)) +
+  geom_boxplot(outlier.shape = NA,
+               aes(fill = genotype), 
+               alpha = 0.5) +
+  geom_point(aes(colour = genotype), 
+             position = position_jitterdodge()) +
+  facet_wrap(~binforvis, nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        legend.position = "bottom") +
+  ylab("Relative number of repetition tetragrams\n(LLLL + RRRR) / total_turns") +
+  scale_colour_viridis_d(end = 0.75) +
+  scale_fill_viridis_d(end = 0.75) 
+```
+
+# repetition model
+
+I fitted the over-bins data to another generalised linear mixed effect model (beta-binomial distribution), this time compariing the reps vs non-reps (LLLL + RRRR). 
+
+```{r}
+sgsh_FeCit_glm_reps <- final_data %>%
+  left_join(LR_Bias) %>%
+  mutate(
+    non_reps = total_turns - reps,
+    bin = as.factor(bin)
+  ) %>%
+  glmmTMB(
+    cbind(reps, non_reps) ~ (bin + genotype + treatment)^3 + L_R_bias + tank + sex + (1|start_time) + (1|fish_id),
+    family = betabinomial(),
+    data = .
+  )
+
+
+sgsh_FeCit_glm_reps_anova <- Anova(sgsh_FeCit_glm_reps) %>%
+  as.data.frame() %>%
+  signif(digits = 2)
+
+# saving the anova values table as a csv for paper tables
+
+write.csv(sgsh_FeCit_glm_reps_anova, "/Users/admin/Desktop/R projects/MPSIII_zebrafish_sgsh_FeCit_IP_ymaze/output/sgsh_FeCit_glm_reps_anova.csv", row.names = TRUE)
+```
+
+# genotype only
+
+```{r}
+print(emmeans(sgsh_FeCit_glm_reps, ~ genotype), type = "response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = prob)) +
+  geom_col(aes(fill = genotype), 
+           alpha = 0.5,
+           width = 0.75,
+           position = position_dodge()) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.125,
+                size = 1,
+                position = position_dodge(width = 0.75)) +
+  theme(axis.text.x = element_text(hjust = 1,
+                               vjust = 1,
+                               angle = 45), 
+        legend.position = "bottom") +
+  scale_color_viridis_d(end = 0.8, option = "inferno") +
+  scale_fill_viridis_d(end = 0.8, option = "inferno") +
+  labs(y = "Estimated repetition probability s\n(LLLL + RRRR)",
+       x = "Genotype", 
+       title = "GLM predicted probability of zebrafish performing an repetition\ntetragram due to Genotype", 
+       subtitle = "effect of genotype p = 0.017"
+       )
+```
+
+### genotype x treatment
+
+```{r}
+print(emmeans(sgsh_FeCit_glm_reps, ~ genotype * treatment), type = "response") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = genotype, y = prob, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 10,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "bottom",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(0.8, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 20, face = "bold", hjust = 0.5,
+                               vjust = 1),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt"))) +
+        
+  scale_y_continuous(limits = c(0,0.39), breaks = seq(0,0.39,0.025)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Estimated repetition probability ",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of genotype **p = 0.017**, treatment **p = 0.09**, geno * treat **p = 0.84** "
+       )
+
+ggsave(filename = "sgshIPmodel_combinedrepsV2.svg", path = "output", width = 6, height = 6, dpi = 300)
+
+```
+
+## effect of Genotype x Treatment x bin
+
+```{r, fig.height=10}
+print(emmeans(sgsh_FeCit_glm_reps, ~ genotype * treatment * bin), type = "response") %>% 
+  as_tibble() %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = prob, colour = treatment)) +
+  geom_point(aes(colour = treatment, fill = treatment),
+              size = 5,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  geom_smooth(aes(group = treatment, colour = treatment, fill = treatment), alpha = 0.5, se = T, size = 2) +
+  facet_wrap(~genotype, nrow = 1) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "none",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(1.2, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 12, face = "bold", hjust = 0.5,
+                               vjust = 0,
+                               angle = 0),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+        
+  scale_y_continuous(limits = c(0,0.51), breaks = seq(0,0.51,0.05)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Estimated repetition probability ",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of time bin **p = 0.68**, time bin * treatment **p = 0.0077**, time bin * treatment * genotype **p = 0.31**"
+       )
+
+ggsave(filename = "sgshIPmodel_reps_acrossbins.svg", path = "output", width = 12, height = 4, dpi = 300)
+```
+
+## effect of Treatment x bin
+
+The treatment * bin interaction effect was significant p = 0.0077
+
+```{r, fig.height=10}
+print(emmeans(sgsh_FeCit_glm_reps, ~treatment * bin), type = "response") %>% 
+  as_tibble() %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = prob, colour = treatment)) +
+geom_point(aes(colour = treatment, fill = treatment),
+              size = 5,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  geom_smooth(aes(group = treatment, colour = treatment, fill = treatment), alpha = 0.5, se = T, size = 2) +
+ # facet_wrap(~genotype, ncol = 3) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "right",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(1.2, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 12, face = "bold", hjust = 1,
+                               vjust = 1,
+                               angle = 45),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+        
+  scale_y_continuous(limits = c(0,0.36), breaks = seq(0,0.36,0.05)) +
+  scale_color_viridis_d(option = "inferno", end = 0.7) +
+  scale_fill_viridis_d(option = "inferno", end = 0.7) +
+  labs(y = "Estimated repetition probability ",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of treatment * time bin **p = 0.0077**"
+       )
+
+ggsave(filename = "sgshIPmodel_reps_treatment_bins.svg", path = "output", width = 12, height = 4, dpi = 300)
+```
+
+## effect of genotype x bin
+
+The genotype * bin interaction effect was not significant, but was close-ish
+
+```{r, fig.height=10}
+print(emmeans(sgsh_FeCit_glm_reps, ~genotype * bin), type = "response") %>% 
+  as_tibble() %>% 
+  mutate(binforvis = case_when(
+    bin == 1 ~ "0-10", 
+    bin == 2 ~ "10-20", 
+    bin == 3 ~ "20-30", 
+    bin == 4 ~ "30-40", 
+    bin == 5 ~ "40-50", 
+    bin == 6 ~ "50-60"
+    )) %>% 
+  ggplot(aes(x = binforvis, y = prob, colour = genotype)) +
+geom_point(aes(colour = genotype, fill = genotype),
+              size = 5,
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax =asymp.UCL),
+                width = 0.25,
+                size = 1.3,
+                position = position_dodge(width = 0.5)) +
+  geom_smooth(aes(group = genotype, colour = genotype, fill = genotype), alpha = 0.5, se = T, size = 2) +
+  #facet_wrap(~treatment, ncol = 1) +
+  theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
+        legend.position = "right",
+        plot.title = element_markdown(size = 18, hjust = 0.5), 
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15),
+        legend.key.size = unit(1.2, 'cm'),
+        axis.text.y = element_markdown(size = 12),
+        axis.text.x = element_markdown(size = 12, face = "bold", hjust = 1,
+                               vjust = 1,
+                               angle = 45),
+        axis.title.y = element_markdown(size = 16),
+        axis.title.x = element_markdown(size = 16, 
+                                        margin = unit(c(10, 0, 0, 0), "pt")),
+        strip.text = element_markdown(size = 20, face = "bold")) +
+  scale_y_continuous(limits = c(0,0.52), breaks = seq(0,0.52,0.05)) +
+  scale_color_viridis_d(option = "viridis", end = 0.98) +
+  scale_fill_viridis_d(option = "viridis", end = 0.98) +
+  labs(y = "Estimated repetition probability ",
+       x = "", 
+       title = "***sgsh^S387Lfs^***", 
+       subtitle = "Effect of time bin * genotype **p = 0.084**"
+       )
+
+ggsave(filename = "sgshIPmodel_reps_genotype_bins.svg", path = "output", width = 12, height = 4, dpi = 300)
+```
+
+## L or R bias
+```{r}
+print(emmeans(sgsh_FeCit_glm_reps, specs = "L_R_bias"), type = "response") %>%
+  as_tibble() %>%
+  ggplot(aes(L_R_bias, prob, colour = L_R_bias)) +
+  geom_col(aes(fill = L_R_bias),
+           alpha = 0.5,
+           position = position_dodge(width = 0.5)) +
+  geom_errorbar(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    width = 0.25,
+    size = 1,
+    position = position_dodge(width = 0.25)
+    ) +
+  ylab("Estimated alternation probability ") +
+  xlab("Time interval") +
+  theme(
+    axis.text.x = element_text(hjust = 1,
+                               vjust = 1,
+                               angle = 45)
+    ) +
+  scale_y_continuous(limits = c(0,0.5)) +
+  scale_color_viridis_d(end = 0.8, option = "viridis") +
+  scale_fill_viridis_d(end = 0.8, option = "viridis") +
+  ggtitle("GLM predicted probability of zebrafish performing an repetition tetragram due to having a LR bias",
+          subtitle = "Effect of L or R Bias p < 0.000\naveraged out over Genotypes and bins")
+```
+
+#ggsave(filename = "MPSIII_aged_combinedturns_paper1.svg", path = "output/Publication", width = 12, height = 6, dpi = 300)
+
+saveRDS(agedcombturns, "data/R objects/agedcombturns.rds")
+```
+
+
+# Conclusion
+
+
+```{r}
+# export data for later:
+final_data %>% 
+  saveRDS("/Users/admin/Desktop/R projects/MPSIII_zebrafish_Ymaze-main/data/R objects/sgsh_aged.rds")
+```
+
+
+```{r}
+# export glmTMB for combined alternation plot:
+glm %>% 
+  saveRDS("/Users/admin/Desktop/R projects/MPSIII_zebrafish_Ymaze-main/data/R objects/sgsh_aged_glm.rds")
+```
+

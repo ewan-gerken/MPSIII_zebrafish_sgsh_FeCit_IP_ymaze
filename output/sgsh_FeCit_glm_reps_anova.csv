@@ -1,0 +1,11 @@
+"","Chisq","Df","Pr(>Chisq)"
+"bin",3.2,5,0.68
+"genotype",8.2,2,0.017
+"treatment",2.9,1,0.09
+"L_R_bias",47,2,5.3e-11
+"tank",5.2,3,0.16
+"sex",0.0045,1,0.95
+"bin:genotype",17,10,0.084
+"bin:treatment",16,5,0.0077
+"genotype:treatment",0.35,2,0.84
+"bin:genotype:treatment",12,10,0.31
