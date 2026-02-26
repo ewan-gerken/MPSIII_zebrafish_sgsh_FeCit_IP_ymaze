@@ -173,9 +173,9 @@ Genotype proportions divided by treatment look as even as I could expect which i
   mutate(n = n()) %>% 
   ggplot(aes(x = genotype)) +
   geom_bar(aes(fill = treatment), 
-           colour = "black", alpha = 0.5,
-           width = 0.7) +
-  scale_y_continuous(limits = c(0,40), breaks = seq(0,40,4)) +
+           colour = "black", alpha = 0.6,
+           width = 0.7, position = position_dodge()) +
+  scale_y_continuous(limits = c(0,24), breaks = seq(0,24,2)) +
   scale_fill_viridis_d(option = "inferno", end = 0.7) + 
   theme(legend.position = "bottom",
         legend.text = element_text(size = 14),
@@ -191,7 +191,7 @@ Genotype proportions divided by treatment look as even as I could expect which i
 
 saveRDS(sgshIPgenoproportions, "data/R objects/sgshIPgenoproportions.rds")
 
-ggsave(filename = "sgshIPgenoproportions_figV1_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
+ggsave(filename = "sgshIPgenoproportions_figV2_narrow.svg", path = "output", width = 6, height = 6, dpi = 300)
 ```
 
 
@@ -706,6 +706,22 @@ print(emmeans(sgsh_FeCit_turns_glm_JUST_fishid, ~ genotype * treatment), type ="
                 width = 0.25,
                 size = 1.3,
                 position = position_dodge(width = 0.5)) +
+  stat_pvalue_manual(
+    emmeans(sgsh_FeCit_turns_glm_JUST_fishid, pairwise ~ treatment | genotype, adjust = "tukey") %>%
+      .$contrasts %>%
+      as.data.frame() %>%
+      separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+      dplyr::filter(p.value < 0.05) %>%  
+      mutate(
+       y.position = 115,
+         label = sprintf("p = %.2g", p.value)           # 2 sig digits
+      ),
+    size = 5,
+    step.increase = 0.25,
+    y.position = "y.position",
+    bracket.nudge.y = 0,
+    tip.length = 0.05
+  ) +
   theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
         legend.position = "bottom",
         plot.title = element_markdown(size = 18, hjust = 0.5), 
@@ -719,7 +735,7 @@ print(emmeans(sgsh_FeCit_turns_glm_JUST_fishid, ~ genotype * treatment), type ="
         axis.title.x = element_markdown(size = 16, 
                                         margin = unit(c(10, 0, 0, 0), "pt"))) +
         
-  scale_y_continuous(limits = c(0,131), breaks = seq(0,131,10)) +
+  scale_y_continuous(limits = c(0,150), breaks = seq(0,150,25)) +
   scale_color_viridis_d(option = "inferno", end = 0.7) +
   scale_fill_viridis_d(option = "inferno", end = 0.7) +
   labs(y = "Predicted turns per time bin",
@@ -1031,7 +1047,8 @@ final_data_summedoverbins %>%
                ) +
   facet_wrap(~treatment, ncol = 1) +
   scale_fill_viridis_d() +
-  scale_y_continuous(limits = c(0,750), breaks = seq(0,750,100)) +
+  #scale_y_continuous(limits = c(0,200), breaks = seq(0,150,50)) +
+  coord_cartesian(ylim = c(0, 200)) +
   labs(y = "Number of tetragrams",
        colour = "Tetragram",
        x = "Tetragram")+
@@ -1042,7 +1059,7 @@ final_data_summedoverbins %>%
         labs(title = "Tetragram frequency of IP-injected ***sgsh^S387Lfs^*** zebrafish
              in the Y-maze during 1 hour ", y = "tetragram frequency")
 
-ggsave(filename = "sgshIP_tetras_treatmentFacet_figV1.svg", path = "output", width = 12, height = 6, dpi = 300)
+ggsave(filename = "sgshIP_tetras_treatmentFacet_figV3.svg", path = "output", width = 12, height = 6, dpi = 300)
 
 # everything together
 
@@ -1344,6 +1361,22 @@ print(emmeans(sgsh_FeCit_glm_alts, ~ genotype * treatment), type = "response") %
                 width = 0.25,
                 size = 1.3,
                 position = position_dodge(width = 0.5)) +
+  stat_pvalue_manual(
+    emmeans(sgsh_FeCit_glm_alts, pairwise ~ genotype, adjust = "tukey") %>%
+      .$contrasts %>%
+      as.data.frame() %>%
+      separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+      dplyr::filter(p.value < 0.05) %>%  
+      mutate(
+       y.position = 75,
+         label = sprintf("p = %.2g", p.value)           # 2 sig digits
+      ),
+    size = 5,
+    step.increase = 0.1,
+    y.position = "y.position",
+    bracket.nudge.y = 0,
+    tip.length = 0.05
+  ) +
   theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
         legend.position = "bottom",
         plot.title = element_markdown(size = 18, hjust = 0.5), 
@@ -1357,7 +1390,7 @@ print(emmeans(sgsh_FeCit_glm_alts, ~ genotype * treatment), type = "response") %
         axis.title.x = element_markdown(size = 16, 
                                         margin = unit(c(10, 0, 0, 0), "pt"))) +
         
-  scale_y_continuous(limits = c(0,0.25), breaks = seq(0,0.25,0.025)) +
+  scale_y_continuous(limits = c(0,0.3), breaks = seq(0,0.3,0.025)) +
   scale_color_viridis_d(option = "inferno", end = 0.7) +
   scale_fill_viridis_d(option = "inferno", end = 0.7) +
   labs(y = "Estimated alternation probability",
@@ -1366,7 +1399,7 @@ print(emmeans(sgsh_FeCit_glm_alts, ~ genotype * treatment), type = "response") %
        subtitle = "Effect of genotype **p = 0.42**, treatment **p = 0.23**, geno * treat **p = 0.89**"
        )
 
-ggsave(filename = "sgshIPmodel_combinedaltsV2.svg", path = "output", width = 6, height = 6, dpi = 300)
+ggsave(filename = "sgshIPmodel_combinedaltsV3.svg", path = "output", width = 6, height = 6, dpi = 300)
 
 ```
 
@@ -1617,6 +1650,22 @@ print(emmeans(sgsh_FeCit_glm_reps, ~ genotype * treatment), type = "response") %
                 width = 0.25,
                 size = 1.3,
                 position = position_dodge(width = 0.5)) +
+  stat_pvalue_manual(
+    emmeans(sgsh_FeCit_glm_reps, pairwise ~ genotype, adjust = "tukey") %>%
+      .$contrasts %>%
+      as.data.frame() %>%
+      separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+      dplyr::filter(p.value < 0.05) %>%  
+      mutate(
+       y.position = 0.39,
+         label = sprintf("p = %.2g", p.value)           # 2 sig digits
+      ),
+    size = 5,
+    step.increase = 0.1,
+    y.position = "y.position",
+    bracket.nudge.y = 0,
+    tip.length = 0.05
+  ) +
   theme(plot.subtitle = element_markdown(size = 12, hjust = 0.5),
         legend.position = "bottom",
         plot.title = element_markdown(size = 18, hjust = 0.5), 
@@ -1630,7 +1679,7 @@ print(emmeans(sgsh_FeCit_glm_reps, ~ genotype * treatment), type = "response") %
         axis.title.x = element_markdown(size = 16, 
                                         margin = unit(c(10, 0, 0, 0), "pt"))) +
         
-  scale_y_continuous(limits = c(0,0.39), breaks = seq(0,0.39,0.025)) +
+  scale_y_continuous(limits = c(0,0.4), breaks = seq(0,0.4,0.05)) +
   scale_color_viridis_d(option = "inferno", end = 0.7) +
   scale_fill_viridis_d(option = "inferno", end = 0.7) +
   labs(y = "Estimated repetition probability ",
@@ -1639,7 +1688,7 @@ print(emmeans(sgsh_FeCit_glm_reps, ~ genotype * treatment), type = "response") %
        subtitle = "Effect of genotype **p = 0.017**, treatment **p = 0.09**, geno * treat **p = 0.84** "
        )
 
-ggsave(filename = "sgshIPmodel_combinedrepsV2.svg", path = "output", width = 6, height = 6, dpi = 300)
+ggsave(filename = "sgshIPmodel_combinedrepsV3.svg", path = "output", width = 6, height = 6, dpi = 300)
 
 ```
 
